@@ -6,6 +6,7 @@ const REAL_COURT_HEIGHT_METERS = 11.88; // Half court length (baseline to net)
 const REAL_COURT_WIDTH_METERS = 8.23;  // Singles court width
 const REAL_SERVICE_LINE_FROM_NET_METERS = 6.4;
 const STAR_COLORS = ['#FFD700', '#FF6347', '#ADFF2F', '#87CEEB', '#DA70D6', '#FFA500'];
+const MOVEMENT_STEP_METERS = 0.5;
 
 interface SpawnedCard {
   id: string;
@@ -21,13 +22,19 @@ export const RadarView: React.FC<{onCollect: (baseCard: Omit<Rackard, 'id' | 'im
   const [message, setMessage] = useState('Sincronize sua posição para começar.');
   const [courtSize, setCourtSize] = useState({ width: 0, height: 0 });
   const [heading, setHeading] = useState(0);
-  const [displacement, setDisplacement] = useState({x: 0, y: 0});
   const [courtOffset, setCourtOffset] = useState({x: 0, y: 0});
 
   const courtContainerRef = useRef<HTMLDivElement>(null);
   const watchId = useRef<number | null>(null);
   const trailCanvasRef = useRef<HTMLCanvasElement>(null);
   const lastTrailPosition = useRef<{x: number, y: number} | null>(null);
+  const accumulatedDistance = useRef(0);
+  const lastPosition = useRef<{lat: number, lon: number} | null>(null);
+  const headingRef = useRef(heading);
+
+  useEffect(() => {
+    headingRef.current = heading;
+  }, [heading]);
 
   const { pixelsPerMeter, playerSize, cardSize, collectionRadius, serviceLineCenterPos } = useMemo(() => {
     if (courtSize.width === 0) return { pixelsPerMeter: 0, playerSize: 0, cardSize: 0, collectionRadius: 0, serviceLineCenterPos: { x: 0, y: 0 } };
@@ -69,7 +76,12 @@ export const RadarView: React.FC<{onCollect: (baseCard: Omit<Rackard, 'id' | 'im
         setPlayerPosition(serviceLineCenterPos);
         setIsTracking(true);
         setSpawnedCards([]);
+        
+        // Reset movement tracking
+        lastPosition.current = { lat: latitude, lon: longitude };
+        accumulatedDistance.current = 0;
         lastTrailPosition.current = null;
+
         if (trailCanvasRef.current) {
           const ctx = trailCanvasRef.current.getContext('2d');
           ctx?.clearRect(0, 0, trailCanvasRef.current.width, trailCanvasRef.current.height);
@@ -95,21 +107,42 @@ export const RadarView: React.FC<{onCollect: (baseCard: Omit<Rackard, 'id' | 'im
       window.addEventListener('deviceorientation', handleOrientation);
 
       const handlePositionUpdate = (position: GeolocationPosition) => {
+        if (!lastPosition.current) {
+          lastPosition.current = { lat: position.coords.latitude, lon: position.coords.longitude };
+          return;
+        }
+        
         const { latitude, longitude } = position.coords;
-        const R = 6371e3;
-        const dLat = (latitude - startCoords.lat) * (Math.PI / 180);
-        const dLon = (longitude - startCoords.lon) * (Math.PI / 180);
-        const startLatRad = startCoords.lat * (Math.PI / 180);
         
-        const dy_meters = dLat * R;
-        const dx_meters = dLon * R * Math.cos(startLatRad);
+        const R = 6371e3; // Earth's radius in meters
+        const lat1 = lastPosition.current.lat * (Math.PI/180);
+        const lat2 = latitude * (Math.PI/180);
+        const dLat = (latitude - lastPosition.current.lat) * (Math.PI/180);
+        const dLon = (longitude - lastPosition.current.lon) * (Math.PI/180);
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1) * Math.cos(lat2) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        const distanceMovedMeters = R * c;
 
-        setDisplacement({ x: dx_meters, y: dy_meters });
-        
-        setPlayerPosition({
-          x: serviceLineCenterPos.x + dx_meters * pixelsPerMeter,
-          y: serviceLineCenterPos.y - dy_meters * pixelsPerMeter
-        });
+        lastPosition.current = { lat: latitude, lon: longitude };
+        accumulatedDistance.current += distanceMovedMeters;
+
+        if (accumulatedDistance.current >= MOVEMENT_STEP_METERS) {
+            const stepsToTake = Math.floor(accumulatedDistance.current / MOVEMENT_STEP_METERS);
+            accumulatedDistance.current -= stepsToTake * MOVEMENT_STEP_METERS;
+
+            setPlayerPosition(prev => {
+                const stepSizePixels = MOVEMENT_STEP_METERS * pixelsPerMeter;
+                const angleRad = headingRef.current * (Math.PI / 180);
+                
+                // 0deg heading is UP (-Y), 90deg is RIGHT (+X)
+                const dx = Math.sin(angleRad) * stepSizePixels * stepsToTake;
+                const dy = -Math.cos(angleRad) * stepSizePixels * stepsToTake;
+                
+                return { x: prev.x + dx, y: prev.y + dy };
+            });
+        }
       };
 
       watchId.current = navigator.geolocation.watchPosition(handlePositionUpdate, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
@@ -224,8 +257,6 @@ export const RadarView: React.FC<{onCollect: (baseCard: Omit<Rackard, 'id' | 'im
           <p>{message}</p>
           {isTracking && (
             <div className="font-mono text-sm flex gap-4">
-              <span>X: {displacement.x.toFixed(1)}m</span>
-              <span>Y: {displacement.y.toFixed(1)}m</span>
               <span>DIR: {Math.round(heading)}°</span>
             </div>
           )}
